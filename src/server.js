@@ -88,46 +88,82 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // Upload a file: the file is checked ONCE, valid rows are saved, and if any rows
 // were rejected the response is an Excel file listing them with the reasons.
+
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'Choose an .xlsx or .csv file first.' });
+    if (!req.file) {
+      return res.status(400).json({
+        error: 'Choose an .xlsx or .csv file first.',
+      });
+    }
+
+    // Original Excel/CSV filename
+    const uploadedFileName = req.file.originalname;
 
     const { rows, errors } = await processFile(req.file);
 
     if (rows.length === 0 && errors.length === 0) {
-      return res.status(422).json({ error: 'No data rows found in the file.' });
+      return res.status(422).json({
+        error: 'No data rows found in the file.',
+      });
     }
 
-    // Build the rejected file before saving, so a failure here saves nothing
-    const rejectedFile = errors.length > 0 ? await buildRejectedWorkbook(errors) : null;
+    // Build rejected file before saving
+    const rejectedFile =
+      errors.length > 0
+        ? await buildRejectedWorkbook(errors)
+        : null;
 
-    // Save all valid rows in one transaction (chunks of 500)
-    if (rows.length > 0) {
+    // Add the uploaded filename to each valid row
+    const rowsToInsert = rows.map((row) => ({
+      ...row,
+      uploadedFileName,
+    }));
+
+    // Save valid rows in chunks of 500 within a transaction
+    if (rowsToInsert.length > 0) {
       await db.transaction(async (tx) => {
-        for (let i = 0; i < rows.length; i += 500) {
-          await tx.insert(users).values(rows.slice(i, i + 500));
+        for (let i = 0; i < rowsToInsert.length; i += 500) {
+          await tx
+            .insert(users)
+            .values(rowsToInsert.slice(i, i + 500));
         }
       });
     }
 
-    res.setHeader('X-Inserted-Rows', String(rows.length));
+    res.setHeader(
+      'X-Inserted-Rows',
+      String(rowsToInsert.length),
+    );
     res.setHeader('X-Rejected-Rows', String(errors.length));
 
     if (!rejectedFile) {
-      return res.json({ inserted: rows.length, rejected: 0 });
+      return res.json({
+        inserted: rowsToInsert.length,
+        rejected: 0,
+        uploadedFileName,
+      });
     }
 
     res.setHeader(
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     );
-    res.setHeader('Content-Disposition', 'attachment; filename="rejected_rows.xlsx"');
-    res.send(rejectedFile);
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="rejected_rows.xlsx"',
+    );
+
+    return res.send(rejectedFile);
   } catch (err) {
     console.error(err);
-    res.status(400).json({ error: err.message });
+
+    return res.status(400).json({
+      error: err.message,
+    });
   }
 });
+
 
 // List saved rows
 app.get('/api/users', async (_req, res) => {
